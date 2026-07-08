@@ -1,13 +1,16 @@
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings # we are using sentence-transformer embedding mode from huggingface
-from langchain.vectorstores import FAISS
+from langchain_text_splitters import CharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings # we are using sentence-transformer embedding mode from huggingface
+from langchain_community.vectorstores import FAISS
 from langchain_ollama import ChatOllama
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import (ConversationalRetrievalChain)
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 from htmlTemplates import css, bot_template, user_template
+
 
 
 def get_pdf_text(pdf_docs):
@@ -38,20 +41,64 @@ def get_vectorstore(text_chunks):
 
 
 def get_conversation_chain(vectorstore):
-    llm = ChatOllama(model="llama3.2",
-    temperature=0
-)
-    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
-    conversation_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vectorstore.as_retriever(),
-        memory=memory
+    llm = ChatOllama(model="llama3.2", temperature=0)
+    
+    # Contextualize user's question with chat history
+    contextualize_q_system_prompt = (
+        "Given a chat history and the latest user question "
+        "which might reference context in the chat history, "
+        "formulate a standalone question which can be understood "
+        "without the chat history. Do NOT answer the question, "
+        "just reformulate it if needed and otherwise return it as is."
     )
-    return conversation_chain
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+    
+    retriever = vectorstore.as_retriever()
+    history_aware_retriever = create_history_aware_retriever(
+        llm, retriever, contextualize_q_prompt
+    )
+    
+    # Prompt for QA
+    system_prompt = (
+        "You are an assistant for question-answering tasks. "
+        "Use the following pieces of retrieved context to answer "
+        "the question. If you don't know the answer, say that you "
+        "don't know.\n\n"
+        "{context}"
+    )
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+    
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    
+    # Create the final retrieval chain
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    return rag_chain
 
 def handle_userinput(user_question):
-    response = st.session_state.conversation({"question": user_question})
-    st.session_state.chat_history = response["chat_history"]
+    if st.session_state.conversation is None:
+        st.warning("Please process your PDF documents first!")
+        return
+
+    response = st.session_state.conversation.invoke({
+        "input": user_question,
+        "chat_history": st.session_state.chat_history
+    })
+    st.session_state.chat_history.extend([
+        HumanMessage(content=user_question),
+        AIMessage(content=response["answer"])
+    ])
 
     for i, message in enumerate(st.session_state.chat_history):
         if i % 2 == 0:
@@ -71,8 +118,8 @@ def main():
     
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = None
+    if "chat_history" not in st.session_state or st.session_state.chat_history is None:
+        st.session_state.chat_history = []
 
     st.header("PrismicCipherAI- Chat with multiple PDFs 📑:")
     user_question = st.text_input("Ask a Question about your document:")
