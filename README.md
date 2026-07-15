@@ -99,6 +99,8 @@ Let's Now actually understand the logic behind this project and how truly the ba
    
    The entire system is integrated into a user-friendly Streamlit interface, where users can upload PDFs, enter queries, and view results effortlessly. This ensures that the system is easy to use, even for individuals with limited technical expertise.
 
+**7. Future work:**
+API
 
 # License
 
